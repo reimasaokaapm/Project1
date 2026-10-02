@@ -6,6 +6,7 @@
    ========================================================= */
 
 const STORE_KEY = 'liftlog.v1';
+const UNDO_KEY = 'liftlog.undo';
 
 const SEED_MEMO = `デッドリフト 90 3
 シュラッグ 90
@@ -33,7 +34,10 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 function todayStr() {
-  const d = new Date();
+  return todayStrOf(new Date());
+}
+
+function todayStrOf(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
@@ -134,14 +138,24 @@ function freshState() {
   return { v: 1, days: parseMemo(SEED_MEMO), logs: [] };
 }
 
+// 画面が描けない壊れたデータを弾く
+function isValidState(s) {
+  return !!s && Array.isArray(s.days) && Array.isArray(s.logs) &&
+    s.days.every((d) => d && typeof d.id === 'string' && Array.isArray(d.exercises) &&
+      d.exercises.every((e) => e && typeof e.id === 'string' && typeof e.name === 'string')) &&
+    s.logs.every((l) => l && typeof l.exId === 'string' && typeof l.date === 'string');
+}
+
 function load() {
+  let raw = null;
+  try { raw = localStorage.getItem(STORE_KEY); } catch (_) { return freshState(); }
+  if (!raw) return freshState();
   try {
-    const raw = localStorage.getItem(STORE_KEY);
-    if (raw) {
-      const s = JSON.parse(raw);
-      if (s && Array.isArray(s.days) && Array.isArray(s.logs)) return s;
-    }
+    const s = JSON.parse(raw);
+    if (isValidState(s)) return s;
   } catch (_) { /* fall through */ }
+  // 読めないデータは消さずに退避してから初期状態で起動する
+  try { localStorage.setItem(`liftlog.broken.${Date.now()}`, raw); } catch (_) { /* ignore */ }
   return freshState();
 }
 
@@ -151,6 +165,36 @@ function save() {
   } catch (_) {
     toast('保存できませんでした');
   }
+}
+
+// 取り込み・リセットなど大きな操作の直前の状態を1つだけ残す
+function snapshot(label) {
+  try {
+    localStorage.setItem(UNDO_KEY, JSON.stringify({ label, at: Date.now(), state }));
+  } catch (_) { /* ignore */ }
+}
+
+function readUndo() {
+  try {
+    const u = JSON.parse(localStorage.getItem(UNDO_KEY));
+    return u && isValidState(u.state) ? u : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function undoLast() {
+  const u = readUndo();
+  if (!u) return;
+  if (!confirm(`「${u.label}」の前の状態に戻しますか？`)) return;
+  state = u.state;
+  try { localStorage.removeItem(UNDO_KEY); } catch (_) { /* ignore */ }
+  ui.dayId = null;
+  ui.editing = false;
+  save();
+  closeSheet();
+  render();
+  toast('元に戻しました');
 }
 
 /* ---------- derived values ---------- */
@@ -631,6 +675,7 @@ function deleteExercise() {
   const found = findExercise(ui.editTarget);
   if (!found) return;
   if (!confirm(`「${found.ex.name}」と、その記録を削除しますか？`)) return;
+  snapshot(`${found.ex.name}の削除`);
   found.day.exercises = found.day.exercises.filter((e) => e.id !== found.ex.id);
   state.logs = state.logs.filter((l) => l.exId !== found.ex.id);
   save();
@@ -678,6 +723,10 @@ function exportMemo() {
 }
 
 function openSettings() {
+  const u = readUndo();
+  const undoBtn = u
+    ? `<button data-act="undo"><span class="ic">↩️</span><div>直前の操作を取り消す<small>「${esc(u.label)}」の前に戻す（${shortDate(todayStrOf(new Date(u.at)))}）</small></div></button>`
+    : '';
   openSheet(`
     <div class="sh-title">
       <h2>設定</h2>
@@ -696,6 +745,7 @@ function openSettings() {
     <div class="menu">
       <button data-act="backup"><span class="ic">💾</span><div>バックアップをコピー<small>全記録をテキストでコピー（メモアプリ等に保存）</small></div></button>
       <button data-act="restore"><span class="ic">♻️</span><div>バックアップから復元</div></button>
+      ${undoBtn}
       <button class="danger" data-act="reset"><span class="ic">⚠️</span><div>すべてリセット</div></button>
     </div>
     <p class="note">ホーム画面に追加したアプリと Safari とでは保存場所が別になります。機種変更の前などは「バックアップをコピー」で保存しておくと安心です。</p>
@@ -727,8 +777,26 @@ function doImportMemo() {
   const days = parseMemo($('#bigText').value);
   if (!days.length || !days.some((d) => d.exercises.length)) { toast('種目が読み取れませんでした'); return; }
   const n = days.reduce((a, d) => a + d.exercises.length, 0);
-  if (!confirm(`${days.length}日・${n}種目を取り込みます。今の種目と記録は置き換わります。よろしいですか？`)) return;
-  state = { v: 1, days, logs: [] };
+
+  // 同じ名前の種目は、今の設定と記録をそのまま引き継ぐ
+  const oldByName = new Map();
+  state.days.forEach((d) => d.exercises.forEach((e) => { if (!oldByName.has(e.name)) oldByName.set(e.name, e); }));
+  let kept = 0;
+  days.forEach((d) => {
+    d.exercises = d.exercises.map((e) => {
+      const old = oldByName.get(e.name);
+      if (!old) return e;
+      oldByName.delete(e.name);
+      kept++;
+      return { ...e, id: old.id, prog: old.prog, target: old.target, inc: old.inc, step: old.step };
+    });
+  });
+  const ids = new Set(days.flatMap((d) => d.exercises.map((e) => e.id)));
+  const logs = state.logs.filter((l) => ids.has(l.exId));
+
+  if (!confirm(`${days.length}日・${n}種目を取り込みます。\n同じ名前の${kept}種目は記録を引き継ぎます。\n（あとで「直前の操作を取り消す」で戻せます）`)) return;
+  snapshot('メモから取り込み');
+  state = { v: 1, days, logs };
   ui.dayId = null;
   save();
   closeSheet();
@@ -739,8 +807,9 @@ function doImportMemo() {
 function doRestore() {
   try {
     const s = JSON.parse($('#bigText').value);
-    if (!s || !Array.isArray(s.days) || !Array.isArray(s.logs)) throw new Error('bad');
+    if (!isValidState(s)) throw new Error('bad');
     if (!confirm('バックアップの内容で上書きします。よろしいですか？')) return;
+    snapshot('バックアップから復元');
     state = s;
     ui.dayId = null;
     save();
@@ -830,6 +899,7 @@ document.addEventListener('click', (e) => {
     case 'delete-day': {
       const day = currentDay();
       if (!day || !confirm(`「${day.code}」とその種目・記録を削除しますか？`)) break;
+      snapshot(`${day.code}の削除`);
       const ids = new Set(day.exercises.map((x) => x.id));
       state.days = state.days.filter((d) => d.id !== day.id);
       state.logs = state.logs.filter((l) => !ids.has(l.exId));
@@ -842,8 +912,10 @@ document.addEventListener('click', (e) => {
     case 'backup': copyText(JSON.stringify(state), '💾 バックアップをコピーしました'); break;
     case 'restore': openTextSheet('バックアップから復元', '', 'do-restore', 'コピーしておいたバックアップを貼り付けてください'); break;
     case 'do-restore': doRestore(); break;
+    case 'undo': undoLast(); break;
     case 'reset':
       if (!confirm('すべての種目と記録を消して、最初の状態に戻しますか？')) break;
+      snapshot('すべてリセット');
       state = freshState();
       ui.dayId = null;
       save();
@@ -864,18 +936,20 @@ document.addEventListener('focusin', (e) => {
 
 $('#settingsBtn').addEventListener('click', openSettings);
 
-// 日付が変わった後にアプリへ戻ってきたら表示を更新
+// アプリに戻ってきたら表示を更新。選んでいるタブは、日付が変わった時だけおすすめに戻す
+let shownDate = todayStr();
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && !$('#sheet').classList.contains('open')) {
+  if (document.visibilityState !== 'visible' || $('#sheet').classList.contains('open')) return;
+  if (todayStr() !== shownDate) {
+    shownDate = todayStr();
     ui.dayId = null;
-    render();
   }
+  render();
 });
 
 /* ---------- boot ---------- */
 
 ui.dayId = suggestedDayId();
-save();
 render();
 
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});

@@ -1,5 +1,5 @@
 // アプリ本体をキャッシュしてオフラインでも開けるようにする
-const CACHE = 'liftlog-v1';
+const CACHE = 'liftlog-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -12,7 +12,7 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
@@ -23,16 +23,26 @@ self.addEventListener('activate', (e) => {
   );
 });
 
-// ネットにつながる時は最新を取りに行き、つながらない時はキャッシュを使う
+// 保存済みの画面をすぐに出し、最新版は裏で取りに行って次回の起動から使う
+// （電波の弱いジムでも、通信を待たずにすぐ開ける）
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET' || new URL(e.request.url).origin !== location.origin) return;
+  const isPage = e.request.mode === 'navigate';
   e.respondWith(
-    fetch(e.request)
-      .then((res) => {
-        const copy = res.clone();
-        caches.open(CACHE).then((c) => c.put(e.request, copy));
-        return res;
-      })
-      .catch(() => caches.match(e.request, { ignoreSearch: true }).then((r) => r || caches.match('./index.html')))
+    caches.open(CACHE).then(async (cache) => {
+      const cached = await cache.match(isPage ? './index.html' : e.request, { ignoreSearch: true });
+      const update = fetch(e.request)
+        .then((res) => {
+          if (res.ok) cache.put(isPage ? './index.html' : e.request, res.clone());
+          return res;
+        })
+        .catch(() => null);
+      if (cached) {
+        e.waitUntil(update);
+        return cached;
+      }
+      const res = await update;
+      return res || new Response('オフラインです', { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+    })
   );
 });
