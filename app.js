@@ -363,12 +363,13 @@ function cardHtml(ex) {
     </button>`;
 }
 
-function editCardHtml(ex, i, len) {
+function editCardHtml(ex) {
   return `
-    <div class="card editing">
+    <div class="card editing" data-ex="${ex.id}">
+      <span class="drag-handle" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><circle cx="9" cy="6" r="1.7"/><circle cx="15" cy="6" r="1.7"/><circle cx="9" cy="12" r="1.7"/><circle cx="15" cy="12" r="1.7"/><circle cx="9" cy="18" r="1.7"/><circle cx="15" cy="18" r="1.7"/></svg>
+      </span>
       <span class="card-name">${ex.prog ? '<span class="star">★</span> ' : ''}${esc(ex.name)}</span>
-      <button class="mini-btn" data-act="up" data-ex="${ex.id}" ${i === 0 ? 'disabled' : ''} aria-label="上へ">▲</button>
-      <button class="mini-btn" data-act="down" data-ex="${ex.id}" ${i === len - 1 ? 'disabled' : ''} aria-label="下へ">▼</button>
       <button class="mini-btn" data-act="edit-ex" data-ex="${ex.id}" aria-label="編集">✎</button>
     </div>`;
 }
@@ -379,7 +380,8 @@ function renderList() {
   if (!day) { list.innerHTML = '<div class="empty">設定からメモを取り込んでください</div>'; return; }
   if (ui.editing) {
     list.innerHTML =
-      day.exercises.map((ex, i) => editCardHtml(ex, i, day.exercises.length)).join('') +
+      (day.exercises.length > 1 ? '<div class="edit-hint">左の <b>⠿</b> を押さえたまま上下にドラッグで並べ替え</div>' : '') +
+      day.exercises.map(editCardHtml).join('') +
       '<button class="add-card" data-act="add-ex">＋ 種目を追加</button>';
   } else {
     list.innerHTML = day.exercises.length
@@ -683,17 +685,99 @@ function deleteExercise() {
   render();
 }
 
-function moveExercise(exId, dir) {
+function moveExercise(exId, to) {
   const found = findExercise(exId);
   if (!found) return;
   const arr = found.day.exercises;
-  const i = arr.indexOf(found.ex);
-  const j = i + dir;
-  if (j < 0 || j >= arr.length) return;
-  [arr[i], arr[j]] = [arr[j], arr[i]];
+  const from = arr.indexOf(found.ex);
+  if (from === to || to < 0 || to >= arr.length) return;
+  arr.splice(to, 0, arr.splice(from, 1)[0]);
   save();
+}
+
+/* ---------- drag to reorder (edit mode) ---------- */
+
+let drag = null;
+
+function dragShift() {
+  const { cards, card, from, to, slot } = drag;
+  cards.forEach((c, i) => {
+    if (c === card) return;
+    let shift = 0;
+    if (from < to && i > from && i <= to) shift = -slot;
+    else if (from > to && i >= to && i < from) shift = slot;
+    c.style.transform = shift ? `translateY(${shift}px)` : '';
+  });
+}
+
+function dragMove(clientY) {
+  const dy = clientY - drag.startY + (window.scrollY - drag.startScroll);
+  drag.card.style.transform = `translateY(${dy}px) scale(1.03)`;
+  const to = Math.max(0, Math.min(drag.cards.length - 1, Math.round(drag.from + dy / drag.slot)));
+  if (to !== drag.to) {
+    drag.to = to;
+    dragShift();
+  }
+}
+
+function dragEnd() {
+  if (!drag) return;
+  const { card, from, to, raf } = drag;
+  cancelAnimationFrame(raf);
+  drag = null;
+  $('#list').classList.remove('sorting');
+  if (to !== from) moveExercise(card.dataset.ex, to);
   renderList();
 }
+
+// 画面の端に指を持っていったら自動でスクロール
+function dragAutoScroll() {
+  if (!drag) return;
+  const edge = 90;
+  let v = 0;
+  if (drag.y < edge) v = -Math.ceil((edge - drag.y) / 8);
+  else if (drag.y > window.innerHeight - edge) v = Math.ceil((drag.y - (window.innerHeight - edge)) / 8);
+  if (v) {
+    window.scrollBy(0, v);
+    dragMove(drag.y);
+  }
+  drag.raf = requestAnimationFrame(dragAutoScroll);
+}
+
+document.addEventListener('pointerdown', (e) => {
+  const handle = e.target.closest('.drag-handle');
+  if (!handle || drag) return;
+  const card = handle.closest('.card');
+  const cards = [...$('#list').querySelectorAll('.card.editing')];
+  if (cards.length < 2) return;
+  e.preventDefault();
+  drag = {
+    pointerId: e.pointerId,
+    card,
+    cards,
+    from: cards.indexOf(card),
+    to: cards.indexOf(card),
+    slot: cards[1].offsetTop - cards[0].offsetTop,
+    startY: e.clientY,
+    startScroll: window.scrollY,
+    y: e.clientY,
+    raf: 0,
+  };
+  try { handle.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
+  card.classList.add('dragging');
+  $('#list').classList.add('sorting');
+  drag.raf = requestAnimationFrame(dragAutoScroll);
+});
+
+document.addEventListener('pointermove', (e) => {
+  if (!drag || e.pointerId !== drag.pointerId) return;
+  e.preventDefault();
+  drag.y = e.clientY;
+  dragMove(e.clientY);
+}, { passive: false });
+
+document.addEventListener('pointerup', (e) => { if (drag && e.pointerId === drag.pointerId) dragEnd(); });
+document.addEventListener('pointercancel', (e) => { if (drag && e.pointerId === drag.pointerId) dragEnd(); });
 
 function renameDay() {
   const day = currentDay();
@@ -856,8 +940,6 @@ document.addEventListener('click', (e) => {
   switch (act) {
     case 'toggle-edit': ui.editing = !ui.editing; render(); break;
     case 'rename-day': renameDay(); break;
-    case 'up': moveExercise(t.dataset.ex, -1); break;
-    case 'down': moveExercise(t.dataset.ex, 1); break;
     case 'edit-ex': openExerciseEditor(t.dataset.ex); break;
     case 'add-ex': openExerciseEditor(null); break;
     case 'ex-save': saveExerciseEditor(); break;

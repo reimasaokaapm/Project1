@@ -162,8 +162,25 @@ input { font: inherit; color: inherit; }
 }
 
 /* edit mode */
-.card.editing { display: flex; align-items: center; gap: 10px; padding: 12px 12px 12px 18px; }
+.card.editing { display: flex; align-items: center; gap: 6px; padding: 10px 12px 10px 4px; }
 .card.editing .card-name { flex: 1; }
+.drag-handle {
+  flex: none; width: 44px; height: 44px;
+  display: grid; place-items: center;
+  color: var(--sub); cursor: grab;
+  touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+}
+.sorting .card.editing { transition: transform 0.2s ease; }
+.sorting .card.editing.dragging {
+  transition: none; z-index: 5;
+  background: rgba(48, 48, 54, 0.96);
+  border-color: rgba(255, 122, 26, 0.6);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.55);
+}
+.card.dragging .drag-handle { color: var(--accent); cursor: grabbing; }
+.sorting { user-select: none; -webkit-user-select: none; }
+.edit-hint { font-size: 12.5px; color: var(--sub); margin: -4px 4px 2px; }
+.edit-hint b { color: var(--accent); }
 .mini-btn {
   width: 36px; height: 36px; border-radius: 12px;
   display: grid; place-items: center;
